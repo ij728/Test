@@ -80,29 +80,122 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-// ---------- Audio (tiny synth) ----------
-let AC = null;
-function audio() { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); return AC; }
+// ---------- Audio ----------
+let AC = null, masterGain = null, bgmNode = null, bgmScheduler = null, muted = false;
+
+function audio() {
+  if (!AC) {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = AC.createGain();
+    masterGain.gain.value = 1;
+    masterGain.connect(AC.destination);
+  }
+  if (AC.state === 'suspended') AC.resume();
+  return AC;
+}
+
 function beep(freq, dur, type, vol, slide) {
   try {
-    const ac = audio(); if (ac.state === 'suspended') ac.resume();
+    const ac = audio();
     const o = ac.createOscillator(), g = ac.createGain();
     o.type = type || 'square'; o.frequency.value = freq;
     if (slide) o.frequency.exponentialRampToValueAtTime(slide, ac.currentTime + dur);
-    g.gain.value = vol || 0.08;
-    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
-    o.connect(g); g.connect(ac.destination);
+    g.gain.value = muted ? 0 : (vol || 0.08);
+    g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+    o.connect(g); g.connect(masterGain);
     o.start(); o.stop(ac.currentTime + dur);
   } catch (e) {}
 }
+
 const sfx = {
-  jump:  () => beep(330, .18, 'square', .06, 660),
-  coin:  () => { beep(988, .08, 'square', .06); setTimeout(() => beep(1319, .25, 'square', .06), 70); },
-  stomp: () => beep(220, .15, 'triangle', .1, 110),
-  hurt:  () => beep(180, .4, 'sawtooth', .08, 60),
+  jump:  () => beep(330, .18, 'square', .07, 660),
+  coin:  () => { beep(988, .08, 'square', .07); setTimeout(() => beep(1319, .25, 'square', .07), 70); },
+  stomp: () => beep(200, .18, 'triangle', .12, 90),
+  hurt:  () => beep(180, .4, 'sawtooth', .09, 55),
   block: () => beep(140, .1, 'square', .07),
-  win:   () => { [523,659,784,1047].forEach((f,i) => setTimeout(() => beep(f, .25, 'square', .07), i*140)); },
+  win:   () => { [523,659,784,1047].forEach((f,i) => setTimeout(() => beep(f, .3, 'square', .08), i*160)); },
 };
+
+// ---------- Background music ----------
+// Mario-inspired chiptune: alternates between two short melodic loops
+const BGM_TEMPO = 0.14;   // seconds per 16th note
+const BGM_NOTES = [
+  // bar 1 — main melody
+  [659,1],[0,1],[659,1],[0,1],[659,1],[0,1],[523,1],[659,1],
+  [784,2],[0,2],[392,2],[0,2],
+  // bar 2 — middle section
+  [523,2],[0,3],[392,2],[0,3],[330,2],[0,3],[440,1],[494,1],[466,1],[440,2],
+  // bar 3 — bounce back
+  [392,1.5],[659,1.5],[784,2],[880,2],[698,1],[784,2],[659,2],[523,1],[587,1],[494,2],[0,2],
+  // bar 4 — resolve
+  [523,2],[0,3],[392,2],[0,3],[330,4],[0,4],
+];
+
+const BGM_BASS = [
+  [131,2],[0,2],[131,2],[0,2],[131,2],[0,2],[131,2],[0,2],
+  [131,2],[0,2],[131,2],[0,2],[131,2],[0,2],[131,2],[0,2],
+  [165,2],[0,2],[165,2],[0,2],[165,2],[0,2],[165,2],[0,2],
+  [131,2],[0,2],[131,2],[0,2],[131,2],[0,2],[131,2],[0,2],
+];
+
+function scheduleBar(startAt, notes, type, vol, gain) {
+  let t = startAt;
+  for (const [freq, beats] of notes) {
+    const dur = beats * BGM_TEMPO;
+    if (freq > 0 && !muted) {
+      const o = AC.createOscillator(), g = AC.createGain();
+      o.type = type; o.frequency.value = freq;
+      g.gain.value = vol;
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur * 0.85);
+      o.connect(g); g.connect(gain);
+      o.start(t); o.stop(t + dur);
+    }
+    t += dur;
+  }
+  return t;
+}
+
+function calcBarDuration(notes) {
+  return notes.reduce((s, [, b]) => s + b * BGM_TEMPO, 0);
+}
+
+function startBGM() {
+  stopBGM();
+  if (muted) return;
+  try {
+    const ac = audio();
+    const melGain = ac.createGain(); melGain.gain.value = 0.06; melGain.connect(masterGain);
+    const bassGain = ac.createGain(); bassGain.gain.value = 0.04; bassGain.connect(masterGain);
+    const barLen = calcBarDuration(BGM_NOTES);
+
+    let next = ac.currentTime + 0.05;
+    function sched() {
+      while (next < ac.currentTime + 1.5) {
+        next = scheduleBar(next, BGM_NOTES, 'square', 0.06, melGain);
+        scheduleBar(ac.currentTime + (next - barLen - 0.05), BGM_BASS, 'triangle', 0.04, bassGain);
+      }
+      bgmScheduler = setTimeout(sched, 400);
+    }
+    sched();
+    bgmNode = { melGain, bassGain };
+  } catch (e) {}
+}
+
+function stopBGM() {
+  if (bgmScheduler) { clearTimeout(bgmScheduler); bgmScheduler = null; }
+  if (bgmNode) {
+    try { bgmNode.melGain.gain.setValueAtTime(0, AC.currentTime); } catch (e) {}
+    try { bgmNode.bassGain.gain.setValueAtTime(0, AC.currentTime); } catch (e) {}
+    bgmNode = null;
+  }
+}
+
+function toggleMute() {
+  muted = !muted;
+  if (muted) stopBGM();
+  else if (running) startBGM();
+}
 
 // ---------- Level ----------
 const T = 32;                       // tile size
@@ -198,7 +291,7 @@ function startGame(which) {
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('end').classList.add('hidden');
   running = true;
-  audio();
+  startBGM();
 }
 
 // ---------- Input ----------
@@ -215,35 +308,64 @@ window.addEventListener('keyup', e => {
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') keys.jump = false;
 });
 
-// Touch buttons (drawn on canvas, world-view coordinates)
+// Touch controls — sizes adapt to both portrait and landscape
+function btnSize() {
+  // Base on the smaller of the two halves: left dpad area = viewW*0.45, right area = viewW*0.45
+  // Never larger than 72px or smaller than 44px (internal units)
+  return Math.max(44, Math.min(72, viewW * 0.145, VIEW_H * 0.175));
+}
 function btnRects() {
-  const s = Math.min(VIEW_H * 0.16, 76), m = 18, by = VIEW_H - s - m;
+  const s = btnSize(), m = 16, gap = 10, by = VIEW_H - s - m;
+  const js = s * 1.25;  // jump slightly bigger but bounded
   return {
     left:  { x: m,           y: by, w: s, h: s },
-    right: { x: m + s + 14,  y: by, w: s, h: s },
-    jump:  { x: viewW - s - m, y: by, w: s * 1.15, h: s },
+    right: { x: m + s + gap, y: by, w: s, h: s },
+    jump:  { x: viewW - js - m, y: by - (js - s) * 0.5, w: js, h: js },
+    mute:  { x: viewW / 2 - 22, y: 8, w: 44, h: 26 },
   };
 }
-const touchState = {};   // touch id -> 'left'|'right'|'jump'
+
+// Track which touch owns which button so a finger sliding off doesn't ghost
+const touchState = {};   // id -> zone string
 function touchToView(t) {
   const r = canvas.getBoundingClientRect();
-  return { x: (t.clientX - r.left) / r.width * viewW, y: (t.clientY - r.top) / r.height * VIEW_H };
+  return {
+    x: (t.clientX - r.left) / r.width  * viewW,
+    y: (t.clientY - r.top)  / r.height * VIEW_H,
+  };
 }
-function hit(p, r) { return p.x >= r.x - 8 && p.x <= r.x + r.w + 8 && p.y >= r.y - 8 && p.y <= r.y + r.h + 8; }
+function hit(p, r, pad) {
+  const k = pad || 10;
+  return p.x >= r.x - k && p.x <= r.x + r.w + k && p.y >= r.y - k && p.y <= r.y + r.h + k;
+}
+
 function updateTouches(e) {
   const rects = btnRects();
   for (const t of e.changedTouches) {
-    if (e.type === 'touchend' || e.type === 'touchcancel') { delete touchState[t.identifier]; continue; }
+    if (e.type === 'touchend' || e.type === 'touchcancel') {
+      delete touchState[t.identifier];
+      continue;
+    }
     const p = touchToView(t);
     let zone = null;
-    for (const k of ['left','right','jump']) if (hit(p, rects[k])) zone = k;
-    // fallback: left half = move zone split, right half = jump
-    if (!zone) zone = p.x > viewW / 2 ? 'jump' : (p.x < viewW / 4 ? 'left' : 'right');
-    if (zone === 'jump' && touchState[t.identifier] !== 'jump') jumpBuffer = 0.12;
+    // Check explicit buttons first (larger pad for jump)
+    if (hit(p, rects.mute, 6))       zone = 'mute';
+    else if (hit(p, rects.jump, 14)) zone = 'jump';
+    else if (hit(p, rects.left, 14)) zone = 'left';
+    else if (hit(p, rects.right, 14))zone = 'right';
+    else {
+      // Fallback swipe zones: right third = jump, else split by quarter
+      zone = p.x > viewW * 0.65 ? 'jump' : (p.x < viewW * 0.3 ? 'left' : 'right');
+    }
+    if (zone === 'mute' && touchState[t.identifier] !== 'mute') {
+      toggleMute();
+      zone = null;   // mute tap only fires once, doesn't hold
+    }
+    if (zone === 'jump' && touchState[t.identifier] !== 'jump') jumpBuffer = 0.15;
     touchState[t.identifier] = zone;
   }
   keys.left = keys.right = keys.jump = false;
-  for (const id in touchState) keys[touchState[id]] = true;
+  for (const id in touchState) if (touchState[id]) keys[touchState[id]] = true;
   e.preventDefault();
 }
 for (const ev of ['touchstart','touchmove','touchend','touchcancel'])
@@ -377,6 +499,7 @@ function moveAndCollide(k) {
 function endGame(win) {
   won = win; running = false;
   if (win) { score += 1000; sfx.win(); }
+  stopBGM();
   setTimeout(() => {
     document.getElementById('endTitle').textContent = win ? '🏆 YOU WIN!' : 'GAME OVER';
     document.getElementById('endStats').innerHTML =
@@ -481,7 +604,7 @@ function draw() {
   ctx.restore();
 
   drawHUD();
-  if (running) drawTouchButtons();
+  drawTouchButtons();
 }
 
 function drawPlayer() {
@@ -580,35 +703,113 @@ function drawClouds(off) {
 }
 
 function drawHUD() {
-  ctx.fillStyle = 'rgba(0,0,0,.35)';
-  roundRect(12, 10, 230, 38, 10); ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.font = 'bold 17px Arial'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText('🪙 ' + coinCount, 24, 30);
-  ctx.fillText('★ ' + score, 92, 30);
-  // lives as mini faces
+  const hudW = Math.min(viewW * 0.72, 240), hudH = 36;
+  ctx.fillStyle = 'rgba(0,0,0,.38)';
+  roundRect(10, 8, hudW, hudH, 10); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 15px Arial'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const cy = 8 + hudH / 2;
+  ctx.fillText('🪙 ' + coinCount, 20, cy);
+  ctx.fillText('★ ' + score, 80, cy);
+  // lives as mini face circles
+  const lifeR = 9, lifeStart = 148;
   for (let i = 0; i < lives; i++) {
-    const lx = 182 + i * 22, ly = 29;
+    const lx = lifeStart + i * (lifeR * 2 + 4), ly = cy;
     ctx.save();
-    ctx.beginPath(); ctx.arc(lx, ly, 9, 0, 7); ctx.clip();
-    if (charImg.complete && charImg.naturalWidth) ctx.drawImage(charImg, lx - 9, ly - 9, 18, 18);
+    ctx.beginPath(); ctx.arc(lx, ly, lifeR, 0, 7); ctx.clip();
+    if (charImg.complete && charImg.naturalWidth) ctx.drawImage(charImg, lx - lifeR, ly - lifeR, lifeR * 2, lifeR * 2);
     ctx.restore();
     ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
-    ctx.beginPath(); ctx.arc(lx, ly, 9, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(lx, ly, lifeR, 0, 7); ctx.stroke();
   }
 }
 
 function drawTouchButtons() {
   const r = btnRects();
+
+  // D-pad background arc to hint at cohesion
+  const padCX = r.left.x + r.right.x + r.right.w - r.left.x;
+  ctx.save();
+  ctx.globalAlpha = 0.12;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.ellipse(
+    (r.left.x + r.right.x + r.right.w) / 2,
+    r.left.y + r.left.h / 2,
+    (r.right.x + r.right.w - r.left.x) * 0.62,
+    r.left.h * 0.72,
+    0, 0, Math.PI * 2
+  );
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
   for (const [k, b] of Object.entries(r)) {
-    ctx.fillStyle = keys[k === 'jump' ? 'jump' : k] ? 'rgba(255,255,255,.45)' : 'rgba(255,255,255,.22)';
-    roundRect(b.x, b.y, b.w, b.h, 16); ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2;
-    roundRect(b.x, b.y, b.w, b.h, 16); ctx.stroke();
-    ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.font = 'bold ' + (b.h * 0.42) + 'px Arial';
+    if (k === 'mute') continue;  // drawn separately below
+    const pressed = keys[k];
+    const isJump = k === 'jump';
+    const radius = isJump ? 999 : 18;  // circle for jump, rounded rect for dpad
+
+    ctx.save();
+    if (pressed) {
+      ctx.translate(b.x + b.w/2, b.y + b.h/2);
+      ctx.scale(0.92, 0.92);
+      ctx.translate(-(b.x + b.w/2), -(b.y + b.h/2));
+    }
+
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,.25)';
+    if (isJump) {
+      ctx.beginPath(); ctx.arc(b.x + b.w/2, b.y + b.h/2 + 4, b.w/2, 0, 7); ctx.fill();
+    } else {
+      roundRect(b.x + 2, b.y + 4, b.w, b.h, radius); ctx.fill();
+    }
+
+    // body gradient
+    const grad = ctx.createRadialGradient(
+      b.x + b.w * 0.4, b.y + b.h * 0.3, 2,
+      b.x + b.w/2, b.y + b.h/2, b.w * 0.7
+    );
+    if (isJump) {
+      grad.addColorStop(0, pressed ? '#ffe066' : '#ffd23f');
+      grad.addColorStop(1, pressed ? '#d48000' : '#e8960a');
+    } else {
+      grad.addColorStop(0, pressed ? 'rgba(255,255,255,.7)' : 'rgba(255,255,255,.38)');
+      grad.addColorStop(1, pressed ? 'rgba(200,200,255,.5)' : 'rgba(140,160,220,.25)');
+    }
+    ctx.fillStyle = grad;
+    if (isJump) {
+      ctx.beginPath(); ctx.arc(b.x + b.w/2, b.y + b.h/2, b.w/2, 0, 7); ctx.fill();
+    } else {
+      roundRect(b.x, b.y, b.w, b.h, radius); ctx.fill();
+    }
+
+    // border
+    ctx.strokeStyle = isJump ? (pressed ? '#c87800' : 'rgba(255,200,0,.8)') : 'rgba(255,255,255,.6)';
+    ctx.lineWidth = isJump ? 3 : 2;
+    if (isJump) {
+      ctx.beginPath(); ctx.arc(b.x + b.w/2, b.y + b.h/2, b.w/2 - 1.5, 0, 7); ctx.stroke();
+    } else {
+      roundRect(b.x + 1, b.y + 1, b.w - 2, b.h - 2, radius); ctx.stroke();
+    }
+
+    // label
+    ctx.fillStyle = isJump ? '#3a2000' : (pressed ? '#fff' : 'rgba(255,255,255,.9)');
+    ctx.font = 'bold ' + (b.h * (isJump ? 0.46 : 0.48)) + 'px Arial';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    const label = k === 'left' ? '◀' : k === 'right' ? '▶' : 'A';
-    ctx.fillText(label, b.x + b.w/2, b.y + b.h/2 + 2);
+    const label = k === 'left' ? '◀' : k === 'right' ? '▶' : 'JUMP';
+    ctx.fillText(label, b.x + b.w/2, b.y + b.h/2 + 1);
+    ctx.restore();
   }
+
+  // Mute button (top centre)
+  const m = r.mute;
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  roundRect(m.x, m.y, m.w, m.h, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.lineWidth = 1.5;
+  roundRect(m.x, m.y, m.w, m.h, 8); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = (m.h * 0.72) + 'px Arial';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(muted ? '🔇' : '🔊', m.x + m.w/2, m.y + m.h/2 + 1);
 }
 function roundRect(x, y, w, h, r) {
   ctx.beginPath();
